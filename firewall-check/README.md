@@ -18,7 +18,8 @@ firewall-check/
 │   └── sample_firewall.csv  # 예시 CSV
 ├── reports/                 # 결과 저장 (gitignore)
 ├── docs/
-│   └── runbook.md           # 운영 가이드
+│   ├── runbook.md           # 운영 가이드
+│   └── workflow-guide.md    # 전체 워크플로우 가이드
 ├── Jenkinsfile              # Jenkins 파이프라인
 └── README.md
 ```
@@ -126,3 +127,11 @@ TARGET: 10.1.1.1, 10.1.1.2  PORT: 80, 443
 - `1`: 스크립트 오류 (CSV 형식 오류, 파일 없음 등)
 
 실패 여부는 콘솔 출력과 리포트 파일에서 확인합니다.
+
+## 문서
+
+| 문서 | 내용 |
+|------|------|
+| [README.md](README.md) | 프로젝트 개요 (이 문서) |
+| [docs/workflow-guide.md](docs/workflow-guide.md) | **전체 워크플로우 가이드** (Git → Jenkins → Script → Results) |
+| [docs/runbook.md](docs/runbook.md) | 운영 가이드 및 트러블슈팅 |
