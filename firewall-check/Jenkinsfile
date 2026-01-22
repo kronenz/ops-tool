@@ -1,0 +1,89 @@
+pipeline {
+    agent {
+        label "${params.NODE_LABEL}"
+    }
+
+    parameters {
+        string(
+            name: 'INPUT_FILE',
+            defaultValue: 'data/sample_firewall.csv',
+            description: '방화벽 오픈 대장 CSV 파일 경로 (repo 내 상대경로 또는 절대경로)'
+        )
+        string(
+            name: 'SOURCE_CLUSTER',
+            defaultValue: '',
+            description: '현재 클러스터 이름 (필수, SOURCE 필터링용)'
+        )
+        string(
+            name: 'TIMEOUT',
+            defaultValue: '2',
+            description: 'ping 타임아웃 (초)'
+        )
+        string(
+            name: 'NODE_LABEL',
+            defaultValue: 'k8s-node',
+            description: '실행할 Jenkins 노드 라벨'
+        )
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (!params.SOURCE_CLUSTER?.trim()) {
+                        error "SOURCE_CLUSTER 파라미터는 필수입니다."
+                    }
+                }
+            }
+        }
+
+        stage('Run Connectivity Check') {
+            steps {
+                script {
+                    def inputPath = params.INPUT_FILE
+                    if (!inputPath.startsWith('/')) {
+                        inputPath = "${WORKSPACE}/${inputPath}"
+                    }
+
+                    def exitCode = sh(
+                        script: """
+                            chmod +x bin/check_firewall.sh
+                            ./bin/check_firewall.sh \\
+                                -i "${inputPath}" \\
+                                -s "${params.SOURCE_CLUSTER}" \\
+                                -t "${params.TIMEOUT}" \\
+                                -o "${WORKSPACE}/reports"
+                        """,
+                        returnStatus: true
+                    )
+
+                    if (exitCode != 0) {
+                        currentBuild.result = 'UNSTABLE'
+                        echo "일부 연결 테스트가 실패했습니다. 상세 결과를 확인하세요."
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true
+        }
+        success {
+            echo '모든 방화벽 연결 테스트가 성공했습니다.'
+        }
+        unstable {
+            echo '일부 방화벽 연결 테스트가 실패했습니다. 아티팩트를 확인하세요.'
+        }
+        failure {
+            echo '파이프라인 실행 중 오류가 발생했습니다.'
+        }
+    }
+}
