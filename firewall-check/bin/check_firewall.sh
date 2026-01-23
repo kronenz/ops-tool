@@ -542,6 +542,22 @@ run_multi_parallel() {
         "TOTAL" "$tt" "$tp" "$tf" "$or"
     echo -e "${CYAN}└──────────────────┴──────────┴──────────┴──────────┴──────────┘${NC}"
     
+    if [[ $tf -gt 0 ]]; then
+        echo ""
+        print_section "실패 목록 (${tf}건)"
+        echo ""
+        for n in "${accessible_nodes[@]}"; do
+            local rpt="${outdir}/report_${n}_${ts}.csv"
+            [[ -f "$rpt" ]] || continue
+            while IFS='|' read -r _ svc src nip tgt prt proto result failat _; do
+                [[ "$result" == "FAIL" ]] || continue
+                local target_str="$tgt"
+                [[ -n "$prt" ]] && target_str="${tgt}:${prt}"
+                echo -e "  ${RED}✗${NC} ${WHITE}${svc}${NC} : ${nip} ${DIM}->${NC} ${target_str} ${DIM}(${proto})${NC} : ${RED}${failat}${NC}"
+            done < "$rpt"
+        done
+    fi
+    
     for n in "${nodes[@]}"; do
         rm -f "${outdir}/.status_${n}_${ts}.tmp" "${outdir}/.result_${n}_${ts}.tmp"
     done
