@@ -169,8 +169,7 @@ list_sources() {
 count_tests() {
     local file="$1" node_ip="$2" count=0
     while IFS='|' read -r _ source target port protocol _; do
-        source=$(echo "$source" | xargs)
-        ip_in_cidr "$node_ip" "$source" || continue
+        # SOURCE 매칭 체크 제거 (정보성 필드로만 사용)
         protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]' | xargs)
         local ips=$(echo "$target" | tr ',' '\n' | grep -c '[0-9]')
         if [[ "$protocol" == "ICMP" ]] || [[ -z "$protocol" ]]; then
@@ -247,12 +246,11 @@ run_node_test() {
     while IFS='|' read -r service source target port protocol _; do
         [[ -z "$service" ]] && continue
         
-        source=$(echo "$source" | xargs)
         port=$(echo "$port" | xargs)
         protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]' | xargs)
         [[ -z "$protocol" ]] && protocol="ICMP"
         
-        ip_in_cidr "$node" "$source" || continue
+        # SOURCE 매칭 체크 제거 - CSV의 모든 규칙 테스트
         
         while IFS= read -r tgt; do
             [[ -z "$tgt" ]] && continue
@@ -606,18 +604,6 @@ else
         NIP=$(get_node_ip)
         [[ "$QUIET" != "true" ]] && log_info "현재 노드: $NIP"
     fi
-    
-    MATCH=false
-    while IFS='|' read -r _ src _ _ _ _; do
-        src=$(echo "$src" | xargs)
-        ip_in_cidr "$NIP" "$src" && MATCH=true && break
-    done < <(tail -n +2 "$INPUT")
-    
-    [[ "$MATCH" == false ]] && { 
-        log_warn "매칭되는 SOURCE 없음"
-        list_sources "$INPUT"
-        exit 0
-    }
     
     run_node_test "$INPUT" "$NIP" "$TIMEOUT" "$OUTDIR" "$DRY" "$TS" "$QUIET"
 fi
