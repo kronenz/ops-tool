@@ -19,16 +19,20 @@ DEFAULT_PING_COUNT=3
 DEFAULT_OUTPUT_DIR="${PROJECT_DIR}/reports"
 REMOTE_SCRIPT_PATH="/tmp/check_firewall_$$.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-GRAY='\033[0;90m'
-WHITE='\033[1;37m'
-DIM='\033[2m'
-NC='\033[0m'
-BOLD='\033[1m'
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    GRAY='\033[0;90m'
+    WHITE='\033[1;37m'
+    DIM='\033[2m'
+    NC='\033[0m'
+    BOLD='\033[1m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' GRAY='' WHITE='' DIM='' NC='' BOLD=''
+fi
 
 #===============================================================================
 # 시각화 함수
@@ -360,7 +364,7 @@ run_on_remote_node() {
     echo "RUNNING|0|0" > "$status_file"
     
     ssh -o StrictHostKeyChecking=no "$node" \
-        "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -I ${node} -t ${timeout} -o ${remote_outdir} -q" 2>/dev/null
+        "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -I ${node} -t ${timeout} -o ${remote_outdir} -q" >/dev/null 2>&1
     
     scp -q -o StrictHostKeyChecking=no "${node}:${remote_outdir}/*" "${outdir}/" 2>/dev/null || true
     
