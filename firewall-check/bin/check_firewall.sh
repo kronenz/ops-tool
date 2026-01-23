@@ -379,10 +379,9 @@ run_on_remote_node() {
 }
 
 monitor_progress() {
-    local outdir="$1" ts="$2" my_ip="$3" dry="$4"
-    shift 4
+    local outdir="$1" ts="$2" total_nodes="$3"
+    shift 3
     local nodes=("$@")
-    local remote_outdir="/tmp/firewall_reports_$$"
     
     echo ""
     while true; do
@@ -392,18 +391,9 @@ monitor_progress() {
         for node in "${nodes[@]}"; do
             local sf="${outdir}/.status_${node}_${ts}.tmp"
             local status="WAIT" current=0 expected=0 pass=0 fail=0 rate=0
-            local raw=""
             
-            if [[ "$node" == "$my_ip" ]] || [[ "$dry" == true ]]; then
-                [[ -f "$sf" ]] && raw=$(cat "$sf" 2>/dev/null)
-            else
-                raw=$(ssh -o ConnectTimeout=1 -o StrictHostKeyChecking=no "$node" \
-                    "cat ${remote_outdir}/.status_${node}_${ts}.tmp 2>/dev/null" 2>/dev/null || echo "")
-                [[ -f "$sf" ]] && [[ -z "$raw" ]] && raw=$(cat "$sf" 2>/dev/null)
-            fi
-            
-            if [[ -n "$raw" ]]; then
-                IFS='|' read -r status p1 p2 p3 <<< "$raw"
+            if [[ -f "$sf" ]]; then
+                IFS='|' read -r status p1 p2 p3 < "$sf"
                 if [[ "$status" == "RUNNING" ]]; then
                     current=$p1; expected=$p2
                     all_done=false
@@ -429,7 +419,7 @@ monitor_progress() {
         printf "\r%-100s" "$line"
         
         $all_done && break
-        sleep 2
+        sleep 1
     done
     echo ""
 }
@@ -515,7 +505,7 @@ run_multi_parallel() {
         fi
     done
     
-    monitor_progress "$outdir" "$ts" "$my_ip" "$dry" "${accessible_nodes[@]}"
+    monitor_progress "$outdir" "$ts" "${#accessible_nodes[@]}" "${accessible_nodes[@]}"
     
     for pid in "${pids[@]}"; do
         wait "$pid" 2>/dev/null || true
