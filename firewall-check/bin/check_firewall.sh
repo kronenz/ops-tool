@@ -1,27 +1,25 @@
 #!/bin/bash
+#===============================================================================
+# Firewall Connectivity Check Tool v3.1
+#===============================================================================
 #
-# Firewall Connectivity Check Tool
-# 방화벽 오픈 대장 기반 연결 확인 테스트 도구
+# 3단계 진단: [1] Network → [2] Host → [3] Port
 #
-# Usage: check_firewall.sh -i <csv_file> -s <source_cluster> [-t <timeout>] [-o <output_dir>] [-n]
+# CSV 형식: SERVICE|SOURCE|TARGET|PORT|PROTOCOL|...
+# 출력 파일: report_<NODE>_<TS>.csv (전체 결과 통합)
 #
-# 지원 프로토콜:
-#   - TCP: 포트 연결 테스트 (nc -z)
-#   - UDP: 포트 연결 테스트 (nc -zu, 신뢰성 제한적)
-#   - ICMP: 호스트 도달 테스트 (ping)
-#
+#===============================================================================
 
 set -uo pipefail
 
-# ============================================================
-# 기본 설정
-# ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 
 DEFAULT_TIMEOUT=2
-DEFAULT_PING_COUNT=5
+DEFAULT_PING_COUNT=3
 DEFAULT_OUTPUT_DIR="${PROJECT_DIR}/reports"
+REMOTE_SCRIPT_PATH="/tmp/check_firewall_$$.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,524 +27,489 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 GRAY='\033[0;90m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
 NC='\033[0m'
+BOLD='\033[1m'
 
-# ============================================================
-# 로깅 함수
-# ============================================================
-log_info()     { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success()  { echo -e "${GREEN}[PASS]${NC} $1"; }
-log_fail()     { echo -e "${RED}[FAIL]${NC} $1"; }
-log_warn()     { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_progress() { echo -e "${CYAN}[${1}/${2}]${NC} ${3}"; }
+#===============================================================================
+# 시각화 함수
+#===============================================================================
 
-log_header() {
+print_box() {
+    local title="$1"
+    local width=60
+    local border="${CYAN}━${NC}"
+    
     echo ""
-    echo "============================================================"
-    echo " $1"
-    echo "============================================================"
+    printf "${CYAN}┏"
+    printf '━%.0s' $(seq 1 $width)
+    printf "┓${NC}\n"
+    printf "${CYAN}┃${NC} ${BOLD}${WHITE}%-$((width-2))s${NC} ${CYAN}┃${NC}\n" "$title"
+    printf "${CYAN}┗"
+    printf '━%.0s' $(seq 1 $width)
+    printf "┛${NC}\n"
 }
 
-# ============================================================
-# 도움말
-# ============================================================
+print_section() {
+    local title="$1"
+    echo ""
+    echo -e "${CYAN}──────────────────────────────────────────────────────────────${NC}"
+    echo -e "${BOLD}${WHITE}  $title${NC}"
+    echo -e "${CYAN}──────────────────────────────────────────────────────────────${NC}"
+}
+
+print_progress_bar() {
+    local current=$1 total=$2 width=30
+    local percent=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    
+    printf "\r  ${DIM}[${NC}"
+    printf "${GREEN}%${filled}s${NC}" | tr ' ' '█'
+    printf "${GRAY}%${empty}s${NC}" | tr ' ' '░'
+    printf "${DIM}]${NC} ${WHITE}%3d%%${NC} ${DIM}(%d/%d)${NC}" "$percent" "$current" "$total"
+}
+
+print_result_icon() {
+    local result="$1"
+    case "$result" in
+        PASS) echo -e "${GREEN}✓${NC}" ;;
+        FAIL) echo -e "${RED}✗${NC}" ;;
+        SKIP) echo -e "${GRAY}○${NC}" ;;
+    esac
+}
+
+print_test_line() {
+    local current=$1 total=$2 service=$3 target=$4 protocol=$5
+    local nr=$6 hr=$7 pr=$8 result=$9
+    
+    local icon=$(print_result_icon "$result")
+    local target_display="$target"
+    [[ ${#target_display} -gt 25 ]] && target_display="${target_display:0:22}..."
+    
+    printf "  ${DIM}[%3d/%3d]${NC} %s %-12s ${DIM}→${NC} %-25s ${DIM}(%s)${NC}" \
+        "$current" "$total" "$icon" "${service:0:12}" "$target_display" "$protocol"
+    
+    printf "  ${DIM}N:${NC}$(print_result_icon "$nr")"
+    printf " ${DIM}H:${NC}$(print_result_icon "$hr")"
+    [[ "$protocol" != "ICMP" ]] && printf " ${DIM}P:${NC}$(print_result_icon "$pr")"
+    echo ""
+}
+
+print_summary_box() {
+    local total=$1 pass=$2 fail=$3 rate=$4
+    local net_p=$5 net_f=$6 host_p=$7 host_f=$8 port_p=$9 port_f=${10}
+    
+    echo ""
+    echo -e "${CYAN}┌──────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│${NC}  ${BOLD}테스트 결과 요약${NC}                                            ${CYAN}│${NC}"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${NC}"
+    printf "${CYAN}│${NC}  총 테스트: ${WHITE}%-6d${NC}  ${GREEN}PASS: %-6d${NC}  ${RED}FAIL: %-6d${NC}  성공률: ${WHITE}%3d%%${NC}  ${CYAN}│${NC}\n" \
+        "$total" "$pass" "$fail" "$rate"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${NC}"
+    printf "${CYAN}│${NC}  ${DIM}[1]${NC} Network: ${GREEN}%4d${NC}/${RED}%-4d${NC}  " "$net_p" "$net_f"
+    printf "${DIM}[2]${NC} Host: ${GREEN}%4d${NC}/${RED}%-4d${NC}  " "$host_p" "$host_f"
+    printf "${DIM}[3]${NC} Port: ${GREEN}%4d${NC}/${RED}%-4d${NC}  ${CYAN}│${NC}\n" "$port_p" "$port_f"
+    echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${NC}"
+}
+
+print_failure_table() {
+    local -n failures_ref=$1
+    local count=${#failures_ref[@]}
+    
+    [[ $count -eq 0 ]] && return
+    
+    print_section "실패 목록 (${count}건)"
+    echo ""
+    for f in "${failures_ref[@]}"; do
+        IFS='|' read -r svc src nip tgt proto layer <<< "$f"
+        echo -e "  ${RED}✗${NC} ${WHITE}${svc}${NC} : ${src} : ${nip} ${DIM}->${NC} ${tgt} ${DIM}(${proto})${NC} : ${RED}${layer}${NC}"
+    done
+}
+
+log_info()  { echo -e "  ${BLUE}ℹ${NC}  $1"; }
+log_warn()  { echo -e "  ${YELLOW}⚠${NC}  $1"; }
+log_error() { echo -e "  ${RED}✗${NC}  $1"; }
+
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <csv_file> -s <source_cluster> [-t <timeout>] [-o <output_dir>] [-n]
+Usage: $(basename "$0") -i <csv> [-N <nodes>] [-t <timeout>] [-o <dir>] [-n]
 
-필수 옵션:
-    -i <csv_file>       방화벽 오픈 대장 CSV 파일 경로
-    -s <source_cluster> 현재 클러스터 이름 (SOURCE 필터링용)
-
-선택 옵션:
-    -t <timeout>        연결 타임아웃 초 (기본: ${DEFAULT_TIMEOUT})
-    -o <output_dir>     결과 저장 디렉토리 (기본: ${DEFAULT_OUTPUT_DIR})
-    -n                  dry-run 모드 (실제 테스트 없이 시뮬레이션)
-    -h                  도움말 출력
-
-CSV 형식 (구분자: |):
-    SERVICE|SOURCE|TARGET|PORT|PROTOCOL|요청일자|요청자|처리일자|처리자
-    - TARGET: 단일 IP 또는 쉼표로 구분된 IP 리스트
-    - PORT: 단일 또는 쉼표로 구분된 PORT 리스트
-    - PROTOCOL: TCP, UDP, ICMP (대소문자 무관)
-
-예시:
-    $(basename "$0") -i /path/to/firewall.csv -s ic-dataops-dev -t 3
-    $(basename "$0") -i firewall.csv -s ic-dataops-dev -n  # dry-run
+옵션:
+  -i  CSV 파일 (필수)
+  -N  노드 목록 파일 (다중 노드 SSH 모드)
+  -t  타임아웃 (기본: 2초)
+  -o  출력 디렉토리
+  -n  dry-run 모드
 EOF
     exit 1
 }
 
-# ============================================================
-# CSV 파싱 함수
-# ============================================================
-parse_targets() {
-    local target_str="$1"
-    echo "$target_str" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
+#===============================================================================
+# 유틸리티 함수
+#===============================================================================
+
+ip_to_int() { 
+    local a b c d
+    IFS='.' read -r a b c d <<< "$1"
+    echo $(( (a<<24)+(b<<16)+(c<<8)+d ))
+}
+
+ip_in_cidr() {
+    local ip="$1" cidr="$2"
+    [[ ! "$cidr" =~ / ]] && { [[ "$ip" == "$cidr" ]] && return 0 || return 1; }
+    local network="${cidr%/*}" prefix="${cidr#*/}"
+    local mask=$(( 0xFFFFFFFF << (32-prefix) & 0xFFFFFFFF ))
+    [[ $(( $(ip_to_int "$ip") & mask )) -eq $(( $(ip_to_int "$network") & mask )) ]]
+}
+
+get_node_ip() {
+    hostname -I 2>/dev/null | awk '{print $1}' || \
+    ip -4 addr show scope global 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1 || \
+    echo "unknown"
+}
+
+parse_targets() { 
+    echo "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
 }
 
 validate_csv_header() {
-    local file="$1"
-    local header
-    header=$(head -1 "$file")
-    
-    if [[ ! "$header" =~ ^SERVICE\|SOURCE\|TARGET ]]; then
-        echo "Error: CSV 헤더 형식이 올바르지 않습니다."
-        echo "  Expected: SERVICE|SOURCE|TARGET|PORT|PROTOCOL|..."
-        echo "  Got: $header"
-        return 1
-    fi
-    return 0
+    local header=$(head -1 "$1")
+    [[ "$header" =~ ^SERVICE\|SOURCE\|TARGET ]] || { echo "Error: Invalid CSV header"; return 1; }
 }
 
-list_available_sources() {
-    local file="$1"
-    awk -F'|' 'NR>1 && $2!="" {print "  - "$2}' "$file" | sort -u
+list_sources() { 
+    awk -F'|' 'NR>1 && $2!="" {print "  - "$2}' "$1" | sort -u
 }
 
-# 테스트 항목 수 미리 계산
-count_total_tests() {
-    local file="$1"
-    local source_filter="$2"
-    local count=0
-    
-    while IFS='|' read -r service source target port protocol _rest; do
-        source=$(echo "$source" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        [[ "$source" != "$source_filter" ]] && continue
-        
-        protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        
-        local ip_count=$(echo "$target" | tr ',' '\n' | grep -c '[0-9]')
-        
+count_tests() {
+    local file="$1" node_ip="$2" count=0
+    while IFS='|' read -r _ source target port protocol _; do
+        source=$(echo "$source" | xargs)
+        ip_in_cidr "$node_ip" "$source" || continue
+        protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]' | xargs)
+        local ips=$(echo "$target" | tr ',' '\n' | grep -c '[0-9]')
         if [[ "$protocol" == "ICMP" ]] || [[ -z "$protocol" ]]; then
-            count=$((count + ip_count))
+            count=$((count + ips))
         else
-            local port_count=$(echo "$port" | tr ',' '\n' | grep -c '[0-9]')
-            [[ $port_count -eq 0 ]] && port_count=1
-            count=$((count + ip_count * port_count))
+            local ports=$(echo "$port" | tr ',' '\n' | grep -c '[0-9]')
+            [[ $ports -eq 0 ]] && ports=1
+            count=$((count + ips * ports))
         fi
     done < <(tail -n +2 "$file")
-    
     echo "$count"
 }
 
-# ============================================================
-# 연결 테스트 함수
-# ============================================================
-test_connectivity() {
-    local target="$1"
-    local port="$2"
-    local protocol="$3"
-    local timeout="$4"
-    
-    protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]')
-    
-    if [[ "$DRY_RUN" == true ]]; then
-        if [[ "$target" =~ ^127\. ]] || [[ "$target" =~ ^8\.8\. ]]; then
-            echo "PASS|OK"
-        else
-            case "$protocol" in
-                TCP)  echo "FAIL|TCP_CONNECTION_REFUSED" ;;
-                UDP)  echo "FAIL|UDP_NO_RESPONSE" ;;
-                *)    echo "FAIL|ICMP_TIMEOUT" ;;
-            esac
-        fi
+#===============================================================================
+# 테스트 함수
+#===============================================================================
+
+test_network() {
+    [[ "$2" == true ]] && { 
+        [[ "$1" =~ ^(127\.|8\.8\.|10\.|192\.168\.) ]] && echo "PASS|ROUTE_OK" || echo "FAIL|NO_ROUTE"
         return
-    fi
-    
-    case "$protocol" in
-        TCP)
-            if [[ -z "$port" ]]; then
-                echo "FAIL|PORT_NOT_SPECIFIED"
-                return
-            fi
-            if nc -z -w "$timeout" "$target" "$port" 2>/dev/null; then
-                echo "PASS|OK"
-            else
-                echo "FAIL|TCP_CONNECTION_FAILED"
-            fi
-            ;;
-        UDP)
-            if [[ -z "$port" ]]; then
-                echo "FAIL|PORT_NOT_SPECIFIED"
-                return
-            fi
-            if nc -zu -w "$timeout" "$target" "$port" 2>/dev/null; then
-                echo "PASS|OK"
-            else
-                echo "FAIL|UDP_NO_RESPONSE"
-            fi
-            ;;
-        ICMP|"")
-            if ping -c "$DEFAULT_PING_COUNT" -W "$timeout" "$target" > /dev/null 2>&1; then
-                echo "PASS|OK"
-            else
-                echo "FAIL|ICMP_TIMEOUT_OR_UNREACHABLE"
-            fi
-            ;;
-        *)
-            echo "FAIL|UNKNOWN_PROTOCOL_${protocol}"
-            ;;
+    }
+    ip route get "$1" &>/dev/null && echo "PASS|ROUTE_OK" || echo "FAIL|NO_ROUTE"
+}
+
+test_host() {
+    [[ "$3" == true ]] && { 
+        [[ "$1" =~ ^(127\.|8\.8\.) ]] && echo "PASS|ICMP_OK" || echo "FAIL|ICMP_TIMEOUT"
+        return
+    }
+    ping -c "$DEFAULT_PING_COUNT" -W "$2" "$1" &>/dev/null && echo "PASS|ICMP_OK" || echo "FAIL|ICMP_TIMEOUT"
+}
+
+test_port() {
+    local target="$1" port="$2" proto="$3" timeout="$4" dry="$5"
+    [[ "$dry" == true ]] && { 
+        [[ "$target" =~ ^(127\.|8\.8\.) ]] && echo "PASS|PORT_OPEN" || echo "FAIL|PORT_CLOSED"
+        return
+    }
+    case "$proto" in
+        TCP) nc -z -w "$timeout" "$target" "$port" 2>/dev/null && echo "PASS|PORT_OPEN" || echo "FAIL|TCP_REFUSED" ;;
+        UDP) nc -zu -w "$timeout" "$target" "$port" 2>/dev/null && echo "PASS|PORT_OPEN" || echo "FAIL|UDP_NO_RESP" ;;
+        *) echo "SKIP|ICMP_MODE" ;;
     esac
 }
 
-# ============================================================
-# 옵션 파싱
-# ============================================================
-INPUT_FILE=""
-SOURCE_CLUSTER=""
-TIMEOUT="$DEFAULT_TIMEOUT"
-OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
-DRY_RUN=false
+#===============================================================================
+# 메인 테스트 실행
+#===============================================================================
 
-while getopts "i:s:t:o:nh" opt; do
+run_node_test() {
+    local input="$1" node="$2" timeout="$3" outdir="$4" dry="$5" ts="$6"
+    
+    local report="${outdir}/report_${node}_${ts}.csv"
+    local total=0 pass=0 fail=0 current=0
+    local net_p=0 net_f=0 host_p=0 host_f=0 port_p=0 port_f=0
+    declare -A svc_pass svc_fail
+    declare -a failures=()
+    
+    local expected=$(count_tests "$input" "$node")
+    
+    print_box "3단계 진단 - Node: $node"
+    log_info "예상 테스트: ${expected}건"
+    echo ""
+    
+    echo "TIMESTAMP|SERVICE|SOURCE|NODE|TARGET|PORT|PROTOCOL|RESULT|FAIL_AT|NETWORK|HOST|PORT" > "$report"
+    
+    while IFS='|' read -r service source target port protocol _; do
+        [[ -z "$service" ]] && continue
+        
+        source=$(echo "$source" | xargs)
+        port=$(echo "$port" | xargs)
+        protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]' | xargs)
+        [[ -z "$protocol" ]] && protocol="ICMP"
+        
+        ip_in_cidr "$node" "$source" || continue
+        
+        while IFS= read -r tgt; do
+            [[ -z "$tgt" ]] && continue
+            
+            if [[ "$protocol" == "ICMP" ]]; then
+                ((total++)); ((current++))
+                
+                IFS='|' read -r nr nrsn <<< "$(test_network "$tgt" "$dry")"
+                [[ "$nr" == "PASS" ]] && ((net_p++)) || ((net_f++))
+                
+                local hr="SKIP" hrsn="NET_FAIL" pr="SKIP" prsn="NA" result="FAIL" fat="Network"
+                
+                if [[ "$nr" == "PASS" ]]; then
+                    IFS='|' read -r hr hrsn <<< "$(test_host "$tgt" "$timeout" "$dry")"
+                    [[ "$hr" == "PASS" ]] && { ((host_p++)); result="PASS"; fat=""; } || { ((host_f++)); fat="Host"; }
+                fi
+                
+                print_test_line "$current" "$expected" "$service" "$tgt" "$protocol" "$nr" "$hr" "$pr" "$result"
+                
+                local now=$(date '+%Y-%m-%d %H:%M:%S')
+                echo "$now|$service|$source|$node|$tgt||$protocol|$result|$fat|$nr|$hr|$pr" >> "$report"
+                
+                if [[ "$result" == "PASS" ]]; then
+                    ((pass++))
+                    svc_pass[$service]=$((${svc_pass[$service]:-0}+1))
+                else
+                    ((fail++))
+                    svc_fail[$service]=$((${svc_fail[$service]:-0}+1))
+                    failures+=("$service|$source|$node|$tgt|$protocol|$fat")
+                fi
+            else
+                while IFS= read -r prt; do
+                    [[ -z "$prt" ]] && continue
+                    ((total++)); ((current++))
+                    
+                    IFS='|' read -r nr nrsn <<< "$(test_network "$tgt" "$dry")"
+                    [[ "$nr" == "PASS" ]] && ((net_p++)) || ((net_f++))
+                    
+                    local hr="SKIP" hrsn="NET_FAIL" pr="SKIP" prsn="NA" result="FAIL" fat="Network"
+                    
+                    if [[ "$nr" == "PASS" ]]; then
+                        IFS='|' read -r hr hrsn <<< "$(test_host "$tgt" "$timeout" "$dry")"
+                        if [[ "$hr" == "PASS" ]]; then
+                            ((host_p++))
+                            IFS='|' read -r pr prsn <<< "$(test_port "$tgt" "$prt" "$protocol" "$timeout" "$dry")"
+                            [[ "$pr" == "PASS" ]] && { ((port_p++)); result="PASS"; fat=""; } || { ((port_f++)); fat="Port"; }
+                        else
+                            ((host_f++)); fat="Host"
+                        fi
+                    fi
+                    
+                    print_test_line "$current" "$expected" "$service" "$tgt:$prt" "$protocol" "$nr" "$hr" "$pr" "$result"
+                    
+                    local now=$(date '+%Y-%m-%d %H:%M:%S')
+                    echo "$now|$service|$source|$node|$tgt|$prt|$protocol|$result|$fat|$nr|$hr|$pr" >> "$report"
+                    
+                    if [[ "$result" == "PASS" ]]; then
+                        ((pass++))
+                        svc_pass[$service]=$((${svc_pass[$service]:-0}+1))
+                    else
+                        ((fail++))
+                        svc_fail[$service]=$((${svc_fail[$service]:-0}+1))
+                        failures+=("$service|$source|$node|$tgt:$prt|$protocol|$fat")
+                    fi
+                done < <(parse_targets "$port")
+            fi
+        done < <(parse_targets "$target")
+    done < <(tail -n +2 "$input")
+    
+    local rate=0
+    [[ $total -gt 0 ]] && rate=$((pass*100/total))
+    
+    print_summary_box "$total" "$pass" "$fail" "$rate" "$net_p" "$net_f" "$host_p" "$host_f" "$port_p" "$port_f"
+    print_failure_table failures
+    
+    echo ""
+    log_info "결과 파일: $report"
+    
+    echo "$node|$total|$pass|$fail|$rate" > "${outdir}/.result_${node}_${ts}.tmp"
+}
+
+#===============================================================================
+# 원격 노드 실행
+#===============================================================================
+
+run_remote_node() {
+    local node="$1" input="$2" timeout="$3" outdir="$4" ts="$5"
+    local remote_csv="/tmp/firewall_check_$$.csv"
+    local remote_outdir="/tmp/firewall_reports_$$"
+    
+    print_box "원격 노드: $node"
+    log_info "SSH 연결 중..."
+    
+    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$node" "echo OK" &>/dev/null; then
+        log_error "SSH 연결 실패: $node"
+        echo "$node|0|0|0|0" > "${outdir}/.result_${node}_${ts}.tmp"
+        return 1
+    fi
+    
+    log_info "파일 전송 중..."
+    scp -q "$SCRIPT_PATH" "${node}:${REMOTE_SCRIPT_PATH}"
+    scp -q "$input" "${node}:${remote_csv}"
+    ssh "$node" "chmod +x ${REMOTE_SCRIPT_PATH}; mkdir -p ${remote_outdir}"
+    
+    log_info "원격 테스트 실행..."
+    ssh -t "$node" "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -t ${timeout} -o ${remote_outdir}" 2>&1
+    
+    log_info "결과 수집 중..."
+    scp -q "${node}:${remote_outdir}/*" "${outdir}/" 2>/dev/null || true
+    
+    local remote_result=$(ssh "$node" "cat ${remote_outdir}/.result_*_*.tmp 2>/dev/null || echo '$node|0|0|0|0'")
+    echo "$remote_result" > "${outdir}/.result_${node}_${ts}.tmp"
+    
+    ssh "$node" "rm -rf ${REMOTE_SCRIPT_PATH} ${remote_csv} ${remote_outdir}" 2>/dev/null || true
+    
+    log_info "완료"
+}
+
+#===============================================================================
+# 다중 노드 오케스트레이션
+#===============================================================================
+
+run_multi() {
+    local input="$1" nfile="$2" timeout="$3" outdir="$4" dry="$5" ts="$6"
+    local nodes=()
+    local my_ip=$(get_node_ip)
+    
+    while IFS= read -r n; do
+        n=$(echo "$n" | xargs | grep -v '^#')
+        [[ -n "$n" ]] && nodes+=("$n")
+    done < "$nfile"
+    
+    print_section "노드 목록"
+    log_info "컨트롤플레인: $my_ip"
+    log_info "대상 노드: ${#nodes[@]}개"
+    for n in "${nodes[@]}"; do
+        [[ "$n" == "$my_ip" ]] && echo -e "    ${GREEN}●${NC} $n ${DIM}(local)${NC}" || echo -e "    ${BLUE}●${NC} $n ${DIM}(remote)${NC}"
+    done
+    
+    for n in "${nodes[@]}"; do
+        if [[ "$dry" == true ]]; then
+            run_node_test "$input" "$n" "$timeout" "$outdir" "$dry" "$ts"
+        elif [[ "$n" == "$my_ip" ]]; then
+            run_node_test "$input" "$n" "$timeout" "$outdir" "false" "$ts"
+        else
+            run_remote_node "$n" "$input" "$timeout" "$outdir" "$ts"
+        fi
+    done
+    
+    print_section "전체 집계"
+    
+    local tt=0 tp=0 tf=0
+    
+    echo ""
+    echo -e "${CYAN}┌──────────────────┬──────────┬──────────┬──────────┬──────────┐${NC}"
+    echo -e "${CYAN}│${NC} ${BOLD}NODE${NC}             ${CYAN}│${NC} ${BOLD}TESTS${NC}    ${CYAN}│${NC} ${BOLD}PASS${NC}     ${CYAN}│${NC} ${BOLD}FAIL${NC}     ${CYAN}│${NC} ${BOLD}RATE${NC}     ${CYAN}│${NC}"
+    echo -e "${CYAN}├──────────────────┼──────────┼──────────┼──────────┼──────────┤${NC}"
+    
+    for n in "${nodes[@]}"; do
+        local rf="${outdir}/.result_${n}_${ts}.tmp"
+        if [[ -f "$rf" ]]; then
+            IFS='|' read -r _ nt np nf nr < "$rf"
+            tt=$((tt+nt)); tp=$((tp+np)); tf=$((tf+nf))
+            printf "${CYAN}│${NC} %-16s ${CYAN}│${NC} %8s ${CYAN}│${NC} ${GREEN}%8s${NC} ${CYAN}│${NC} ${RED}%8s${NC} ${CYAN}│${NC} %7s%% ${CYAN}│${NC}\n" \
+                "${n:0:16}" "$nt" "$np" "$nf" "$nr"
+            rm -f "$rf"
+        else
+            printf "${CYAN}│${NC} %-16s ${CYAN}│${NC} %8s ${CYAN}│${NC} %8s ${CYAN}│${NC} %8s ${CYAN}│${NC} %8s ${CYAN}│${NC}\n" \
+                "${n:0:16}" "-" "-" "-" "N/A"
+        fi
+    done
+    
+    echo -e "${CYAN}├──────────────────┼──────────┼──────────┼──────────┼──────────┤${NC}"
+    local or=0
+    [[ $tt -gt 0 ]] && or=$((tp*100/tt))
+    printf "${CYAN}│${NC} ${BOLD}%-16s${NC} ${CYAN}│${NC} ${BOLD}%8s${NC} ${CYAN}│${NC} ${GREEN}${BOLD}%8s${NC} ${CYAN}│${NC} ${RED}${BOLD}%8s${NC} ${CYAN}│${NC} ${BOLD}%7s%%${NC} ${CYAN}│${NC}\n" \
+        "TOTAL" "$tt" "$tp" "$tf" "$or"
+    echo -e "${CYAN}└──────────────────┴──────────┴──────────┴──────────┴──────────┘${NC}"
+    
+    local agg="${outdir}/summary_${ts}.txt"
+    cat << EOF > "$agg"
+================================================================================
+ 방화벽 3단계 진단 - 전체 집계
+================================================================================
+ 실행시각: $(date '+%Y-%m-%d %H:%M:%S')
+ 컨트롤플레인: $my_ip
+ 대상노드: ${#nodes[@]}개
+--------------------------------------------------------------------------------
+ 총 테스트: $tt | PASS: $tp | FAIL: $tf | 성공률: ${or}%
+================================================================================
+EOF
+    echo ""
+    log_info "집계 파일: $agg"
+}
+
+#===============================================================================
+# 메인
+#===============================================================================
+
+INPUT="" NODES="" TIMEOUT="$DEFAULT_TIMEOUT" OUTDIR="$DEFAULT_OUTPUT_DIR" DRY=false
+
+while getopts "i:N:t:o:nh" opt; do
     case $opt in
-        i) INPUT_FILE="$OPTARG" ;;
-        s) SOURCE_CLUSTER="$OPTARG" ;;
-        t) TIMEOUT="$OPTARG" ;;
-        o) OUTPUT_DIR="$OPTARG" ;;
-        n) DRY_RUN=true ;;
-        h) usage ;;
-        *) usage ;;
+        i) INPUT="$OPTARG";;
+        N) NODES="$OPTARG";;
+        t) TIMEOUT="$OPTARG";;
+        o) OUTDIR="$OPTARG";;
+        n) DRY=true;;
+        h) usage;;
+        *) usage;;
     esac
 done
 
-# ============================================================
-# 입력 검증
-# ============================================================
-if [[ -z "$INPUT_FILE" ]]; then
-    echo "Error: -i <csv_file> 옵션이 필요합니다."
-    usage
-fi
+[[ -z "$INPUT" ]] && { echo "Error: -i required"; usage; }
+[[ ! -f "$INPUT" ]] && { echo "Error: $INPUT not found"; exit 1; }
+validate_csv_header "$INPUT" || exit 1
+[[ -n "$NODES" && ! -f "$NODES" ]] && { echo "Error: $NODES not found"; exit 1; }
 
-if [[ -z "$SOURCE_CLUSTER" ]]; then
-    echo "Error: -s <source_cluster> 옵션이 필요합니다."
-    usage
-fi
+mkdir -p "$OUTDIR"
+TS=$(date '+%Y%m%d_%H%M%S')
 
-if [[ ! -f "$INPUT_FILE" ]]; then
-    echo "Error: 입력 파일을 찾을 수 없습니다: $INPUT_FILE"
-    exit 1
-fi
+print_box "방화벽 3단계 진단 v3.1"
+log_info "입력: $INPUT"
+log_info "진단: [1]Network → [2]Host → [3]Port"
+[[ "$DRY" == true ]] && log_warn "DRY-RUN 모드"
 
-if ! validate_csv_header "$INPUT_FILE"; then
-    exit 1
-fi
-
-if ! command -v nc &> /dev/null; then
-    log_warn "nc (netcat) 명령어가 없습니다. TCP/UDP 테스트는 실패합니다."
-    log_warn "설치: yum install -y nc (또는 nmap-ncat)"
-fi
-
-# ============================================================
-# 초기화
-# ============================================================
-mkdir -p "$OUTPUT_DIR"
-
-TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-DETAILS_FILE="${OUTPUT_DIR}/details_${TIMESTAMP}.csv"
-SUMMARY_FILE="${OUTPUT_DIR}/summary_${TIMESTAMP}.txt"
-FAILED_FILE="${OUTPUT_DIR}/failed_${TIMESTAMP}.csv"
-
-TOTAL_ROWS=0
-FILTERED_ROWS=0
-TOTAL_TESTS=0
-PASS_COUNT=0
-FAIL_COUNT=0
-
-# 프로토콜별 통계
-TCP_PASS=0; TCP_FAIL=0
-UDP_PASS=0; UDP_FAIL=0
-ICMP_PASS=0; ICMP_FAIL=0
-
-# 서비스별 통계
-declare -A SERVICE_PASS
-declare -A SERVICE_FAIL
-
-declare -a FAILED_TESTS=()
-
-# ============================================================
-# 실행 시작
-# ============================================================
-log_header "방화벽 연결 확인 테스트"
-
-log_info "실행 시간: $(date '+%Y-%m-%d %H:%M:%S')"
-log_info "입력 파일: $INPUT_FILE"
-log_info "소스 클러스터: $SOURCE_CLUSTER"
-log_info "타임아웃: ${TIMEOUT}초"
-log_info "지원 프로토콜: TCP (포트), UDP (포트), ICMP (ping)"
-[[ "$DRY_RUN" == true ]] && log_warn "DRY-RUN 모드: 실제 테스트 없이 시뮬레이션"
-
-EXPECTED_TESTS=$(count_total_tests "$INPUT_FILE" "$SOURCE_CLUSTER")
-log_info "예상 테스트 수: ${EXPECTED_TESTS}건"
-log_info "결과 파일: $DETAILS_FILE"
-
-echo "SERVICE,SOURCE,TARGET,PORT,PROTOCOL,RESULT,REASON,TIMESTAMP" > "$DETAILS_FILE"
-echo "SERVICE,SOURCE,TARGET,PORT,PROTOCOL,RESULT,REASON,TIMESTAMP" > "$FAILED_FILE"
-
-log_header "테스트 실행"
-
-CURRENT_TEST=0
-
-# ============================================================
-# CSV 파싱 및 테스트
-# ============================================================
-while IFS='|' read -r service source target port protocol _rest; do
-    [[ -z "$service" ]] && continue
-    
-    ((TOTAL_ROWS++)) || true
-    
-    source=$(echo "$source" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    port=$(echo "$port" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    protocol=$(echo "$protocol" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    
-    if [[ "$source" != "$SOURCE_CLUSTER" ]]; then
-        continue
-    fi
-    
-    ((FILTERED_ROWS++)) || true
-    
-    proto_upper=$(echo "$protocol" | tr '[:lower:]' '[:upper:]')
-    [[ -z "$proto_upper" ]] && proto_upper="ICMP"
-    
-    while IFS= read -r single_target; do
-        [[ -z "$single_target" ]] && continue
-        
-        if [[ "$proto_upper" == "ICMP" ]]; then
-            ((TOTAL_TESTS++)) || true
-            ((CURRENT_TEST++)) || true
-            
-            test_result=$(test_connectivity "$single_target" "" "$proto_upper" "$TIMEOUT")
-            result=$(echo "$test_result" | cut -d'|' -f1)
-            reason=$(echo "$test_result" | cut -d'|' -f2)
-            test_timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-            
-            if [[ "$result" == "PASS" ]]; then
-                ((PASS_COUNT++)) || true
-                ((ICMP_PASS++)) || true
-                SERVICE_PASS[$service]=$((${SERVICE_PASS[$service]:-0} + 1))
-                log_progress "$CURRENT_TEST" "$EXPECTED_TESTS" "${GREEN}PASS${NC} $service -> $single_target (ICMP)"
-            else
-                ((FAIL_COUNT++)) || true
-                ((ICMP_FAIL++)) || true
-                SERVICE_FAIL[$service]=$((${SERVICE_FAIL[$service]:-0} + 1))
-                log_progress "$CURRENT_TEST" "$EXPECTED_TESTS" "${RED}FAIL${NC} $service -> $single_target (ICMP) - $reason"
-                FAILED_TESTS+=("$service|$single_target|ICMP|$reason")
-                echo "$service,$source,$single_target,,ICMP,$result,$reason,$test_timestamp" >> "$FAILED_FILE"
-            fi
-            
-            echo "$service,$source,$single_target,,ICMP,$result,$reason,$test_timestamp" >> "$DETAILS_FILE"
-        else
-            while IFS= read -r single_port; do
-                [[ -z "$single_port" ]] && continue
-                
-                ((TOTAL_TESTS++)) || true
-                ((CURRENT_TEST++)) || true
-                
-                test_result=$(test_connectivity "$single_target" "$single_port" "$proto_upper" "$TIMEOUT")
-                result=$(echo "$test_result" | cut -d'|' -f1)
-                reason=$(echo "$test_result" | cut -d'|' -f2)
-                test_timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-                
-                display_target="${single_target}:${single_port}"
-                
-                if [[ "$result" == "PASS" ]]; then
-                    ((PASS_COUNT++)) || true
-                    if [[ "$proto_upper" == "TCP" ]]; then
-                        ((TCP_PASS++)) || true
-                    else
-                        ((UDP_PASS++)) || true
-                    fi
-                    SERVICE_PASS[$service]=$((${SERVICE_PASS[$service]:-0} + 1))
-                    log_progress "$CURRENT_TEST" "$EXPECTED_TESTS" "${GREEN}PASS${NC} $service -> $display_target ($proto_upper)"
-                else
-                    ((FAIL_COUNT++)) || true
-                    if [[ "$proto_upper" == "TCP" ]]; then
-                        ((TCP_FAIL++)) || true
-                    else
-                        ((UDP_FAIL++)) || true
-                    fi
-                    SERVICE_FAIL[$service]=$((${SERVICE_FAIL[$service]:-0} + 1))
-                    log_progress "$CURRENT_TEST" "$EXPECTED_TESTS" "${RED}FAIL${NC} $service -> $display_target ($proto_upper) - $reason"
-                    FAILED_TESTS+=("$service|$display_target|$proto_upper|$reason")
-                    echo "$service,$source,$single_target,$single_port,$proto_upper,$result,$reason,$test_timestamp" >> "$FAILED_FILE"
-                fi
-                
-                echo "$service,$source,$single_target,$single_port,$proto_upper,$result,$reason,$test_timestamp" >> "$DETAILS_FILE"
-                
-            done < <(parse_targets "$port")
-        fi
-        
-    done < <(parse_targets "$target")
-    
-done < <(tail -n +2 "$INPUT_FILE")
-
-# ============================================================
-# 필터링 결과 검증
-# ============================================================
-if [[ $FILTERED_ROWS -eq 0 ]]; then
-    log_warn "SOURCE='$SOURCE_CLUSTER'와 일치하는 행이 없습니다."
-    log_warn "CSV 파일의 SOURCE 컬럼 값을 확인하세요."
-    log_info "CSV에 있는 SOURCE 목록:"
-    list_available_sources "$INPUT_FILE"
-fi
-
-# ============================================================
-# 결과 요약 출력
-# ============================================================
-log_header "테스트 결과 요약"
-
-echo ""
-echo "  입력 파일 총 행수 (헤더 제외): $TOTAL_ROWS"
-echo "  필터링된 행수 (SOURCE=$SOURCE_CLUSTER): $FILTERED_ROWS"
-echo "  총 테스트 수: $TOTAL_TESTS"
-echo ""
-
-SUCCESS_RATE=0
-if [[ $TOTAL_TESTS -gt 0 ]]; then
-    SUCCESS_RATE=$((PASS_COUNT * 100 / TOTAL_TESTS))
-fi
-
-echo "  ==========================================="
-echo -e "  ${GREEN}성공 (PASS)${NC}: $PASS_COUNT"
-echo -e "  ${RED}실패 (FAIL)${NC}: $FAIL_COUNT"
-echo "  -------------------------------------------"
-echo "  성공률: ${SUCCESS_RATE}%"
-echo "  ==========================================="
-
-# 프로토콜별 통계
-log_header "프로토콜별 통계"
-echo ""
-TCP_TOTAL=$((TCP_PASS + TCP_FAIL))
-UDP_TOTAL=$((UDP_PASS + UDP_FAIL))
-ICMP_TOTAL=$((ICMP_PASS + ICMP_FAIL))
-
-if [[ $TCP_TOTAL -gt 0 ]]; then
-    TCP_RATE=$((TCP_PASS * 100 / TCP_TOTAL))
-    echo -e "  TCP  : ${GREEN}${TCP_PASS} PASS${NC} / ${RED}${TCP_FAIL} FAIL${NC} (총 ${TCP_TOTAL}건, 성공률 ${TCP_RATE}%)"
-fi
-if [[ $UDP_TOTAL -gt 0 ]]; then
-    UDP_RATE=$((UDP_PASS * 100 / UDP_TOTAL))
-    echo -e "  UDP  : ${GREEN}${UDP_PASS} PASS${NC} / ${RED}${UDP_FAIL} FAIL${NC} (총 ${UDP_TOTAL}건, 성공률 ${UDP_RATE}%)"
-fi
-if [[ $ICMP_TOTAL -gt 0 ]]; then
-    ICMP_RATE=$((ICMP_PASS * 100 / ICMP_TOTAL))
-    echo -e "  ICMP : ${GREEN}${ICMP_PASS} PASS${NC} / ${RED}${ICMP_FAIL} FAIL${NC} (총 ${ICMP_TOTAL}건, 성공률 ${ICMP_RATE}%)"
-fi
-
-# 서비스별 통계
-log_header "서비스별 통계"
-echo ""
-for svc in $(echo "${!SERVICE_PASS[@]} ${!SERVICE_FAIL[@]}" | tr ' ' '\n' | sort -u); do
-    svc_pass=${SERVICE_PASS[$svc]:-0}
-    svc_fail=${SERVICE_FAIL[$svc]:-0}
-    svc_total=$((svc_pass + svc_fail))
-    if [[ $svc_total -gt 0 ]]; then
-        svc_rate=$((svc_pass * 100 / svc_total))
-        if [[ $svc_fail -eq 0 ]]; then
-            echo -e "  ${GREEN}●${NC} $svc: ${svc_pass}/${svc_total} (${svc_rate}%)"
-        elif [[ $svc_pass -eq 0 ]]; then
-            echo -e "  ${RED}●${NC} $svc: ${svc_pass}/${svc_total} (${svc_rate}%)"
-        else
-            echo -e "  ${YELLOW}●${NC} $svc: ${svc_pass}/${svc_total} (${svc_rate}%)"
-        fi
-    fi
-done
-
-# 실패 목록
-if [[ ${#FAILED_TESTS[@]} -gt 0 ]]; then
-    log_header "실패 목록 (${#FAILED_TESTS[@]}건)"
-    
-    current_svc=""
-    for failed in "${FAILED_TESTS[@]}"; do
-        IFS='|' read -r svc tgt proto rsn <<< "$failed"
-        if [[ "$svc" != "$current_svc" ]]; then
-            current_svc="$svc"
-            echo ""
-            echo -e "  ${YELLOW}[$svc]${NC}"
-        fi
-        echo "    - $tgt ($proto) : $rsn"
-    done
-fi
-
-# ============================================================
-# Summary 파일 저장
-# ============================================================
-cat << EOF > "$SUMMARY_FILE"
-============================================================
- 방화벽 연결 확인 테스트 결과 요약
-============================================================
-
-실행 시간: $(date '+%Y-%m-%d %H:%M:%S')
-입력 파일: $INPUT_FILE
-소스 클러스터: $SOURCE_CLUSTER
-타임아웃: ${TIMEOUT}초
-모드: $([ "$DRY_RUN" == true ] && echo "DRY-RUN (시뮬레이션)" || echo "실제 테스트")
-
-------------------------------------------------------------
-전체 통계
-------------------------------------------------------------
-입력 파일 총 행수: $TOTAL_ROWS
-필터링된 행수: $FILTERED_ROWS
-총 테스트 수: $TOTAL_TESTS
-성공 (PASS): $PASS_COUNT
-실패 (FAIL): $FAIL_COUNT
-성공률: ${SUCCESS_RATE}%
-
-------------------------------------------------------------
-프로토콜별 통계
-------------------------------------------------------------
-EOF
-
-[[ $TCP_TOTAL -gt 0 ]] && echo "TCP  : ${TCP_PASS} PASS / ${TCP_FAIL} FAIL (총 ${TCP_TOTAL}건, 성공률 ${TCP_RATE:-0}%)" >> "$SUMMARY_FILE"
-[[ $UDP_TOTAL -gt 0 ]] && echo "UDP  : ${UDP_PASS} PASS / ${UDP_FAIL} FAIL (총 ${UDP_TOTAL}건, 성공률 ${UDP_RATE:-0}%)" >> "$SUMMARY_FILE"
-[[ $ICMP_TOTAL -gt 0 ]] && echo "ICMP : ${ICMP_PASS} PASS / ${ICMP_FAIL} FAIL (총 ${ICMP_TOTAL}건, 성공률 ${ICMP_RATE:-0}%)" >> "$SUMMARY_FILE"
-
-cat << EOF >> "$SUMMARY_FILE"
-
-------------------------------------------------------------
-서비스별 통계
-------------------------------------------------------------
-EOF
-
-for svc in $(echo "${!SERVICE_PASS[@]} ${!SERVICE_FAIL[@]}" | tr ' ' '\n' | sort -u); do
-    svc_pass=${SERVICE_PASS[$svc]:-0}
-    svc_fail=${SERVICE_FAIL[$svc]:-0}
-    svc_total=$((svc_pass + svc_fail))
-    if [[ $svc_total -gt 0 ]]; then
-        svc_rate=$((svc_pass * 100 / svc_total))
-        echo "$svc: ${svc_pass}/${svc_total} (${svc_rate}%)" >> "$SUMMARY_FILE"
-    fi
-done
-
-cat << EOF >> "$SUMMARY_FILE"
-
-------------------------------------------------------------
-실패 목록 (${#FAILED_TESTS[@]}건)
-------------------------------------------------------------
-EOF
-
-if [[ ${#FAILED_TESTS[@]} -gt 0 ]]; then
-    current_svc=""
-    for failed in "${FAILED_TESTS[@]}"; do
-        IFS='|' read -r svc tgt proto rsn <<< "$failed"
-        if [[ "$svc" != "$current_svc" ]]; then
-            current_svc="$svc"
-            echo "" >> "$SUMMARY_FILE"
-            echo "[$svc]" >> "$SUMMARY_FILE"
-        fi
-        echo "  - $tgt ($proto) : $rsn" >> "$SUMMARY_FILE"
-    done
+if [[ -n "$NODES" ]]; then
+    run_multi "$INPUT" "$NODES" "$TIMEOUT" "$OUTDIR" "$DRY" "$TS"
 else
-    echo "(없음)" >> "$SUMMARY_FILE"
+    NIP=$(get_node_ip)
+    log_info "현재 노드: $NIP"
+    
+    MATCH=false
+    while IFS='|' read -r _ src _ _ _ _; do
+        src=$(echo "$src" | xargs)
+        ip_in_cidr "$NIP" "$src" && MATCH=true && break
+    done < <(tail -n +2 "$INPUT")
+    
+    [[ "$MATCH" == false ]] && { 
+        log_warn "매칭되는 SOURCE 없음"
+        list_sources "$INPUT"
+        exit 0
+    }
+    
+    run_node_test "$INPUT" "$NIP" "$TIMEOUT" "$OUTDIR" "$DRY" "$TS"
 fi
 
-# ============================================================
-# 완료
-# ============================================================
 echo ""
-log_info "상세 결과: $DETAILS_FILE"
-log_info "실패 목록: $FAILED_FILE"
-log_info "요약 결과: $SUMMARY_FILE"
-
 exit 0
