@@ -20,16 +20,16 @@ DEFAULT_OUTPUT_DIR="${PROJECT_DIR}/reports"
 REMOTE_SCRIPT_PATH="/tmp/check_firewall_$$.sh"
 
 if [[ -t 1 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    CYAN='\033[0;36m'
-    GRAY='\033[0;90m'
-    WHITE='\033[1;37m'
-    DIM='\033[2m'
-    NC='\033[0m'
-    BOLD='\033[1m'
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[1;33m'
+    BLUE=$'\033[0;34m'
+    CYAN=$'\033[0;36m'
+    GRAY=$'\033[0;90m'
+    WHITE=$'\033[1;37m'
+    DIM=$'\033[2m'
+    NC=$'\033[0m'
+    BOLD=$'\033[1m'
 else
     RED='' GREEN='' YELLOW='' BLUE='' CYAN='' GRAY='' WHITE='' DIM='' NC='' BOLD=''
 fi
