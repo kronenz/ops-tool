@@ -134,11 +134,12 @@ log_error() { echo -e "  ${RED}✗${NC}  $1"; }
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <csv> [-N <nodes>] [-t <timeout>] [-o <dir>] [-n]
+Usage: $(basename "$0") -i <csv> [-N <nodes>] [-I <ip>] [-t <timeout>] [-o <dir>] [-n]
 
 옵션:
   -i  CSV 파일 (필수)
   -N  노드 목록 파일 (다중 노드 SSH 모드)
+  -I  노드 IP 강제 지정 (자동 감지 대신 사용)
   -t  타임아웃 (기본: 2초)
   -o  출력 디렉토리
   -n  dry-run 모드
@@ -369,7 +370,7 @@ run_remote_node() {
     ssh "$node" "chmod +x ${REMOTE_SCRIPT_PATH}; mkdir -p ${remote_outdir}"
     
     log_info "원격 테스트 실행..."
-    ssh -t "$node" "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -t ${timeout} -o ${remote_outdir}" 2>&1
+    ssh -t "$node" "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -I ${node} -t ${timeout} -o ${remote_outdir}" 2>&1
     
     log_info "결과 수집 중..."
     scp -q "${node}:${remote_outdir}/*" "${outdir}/" 2>/dev/null || true
@@ -463,12 +464,13 @@ EOF
 # 메인
 #===============================================================================
 
-INPUT="" NODES="" TIMEOUT="$DEFAULT_TIMEOUT" OUTDIR="$DEFAULT_OUTPUT_DIR" DRY=false
+INPUT="" NODES="" TIMEOUT="$DEFAULT_TIMEOUT" OUTDIR="$DEFAULT_OUTPUT_DIR" DRY=false FORCE_IP=""
 
-while getopts "i:N:t:o:nh" opt; do
+while getopts "i:N:I:t:o:nh" opt; do
     case $opt in
         i) INPUT="$OPTARG";;
         N) NODES="$OPTARG";;
+        I) FORCE_IP="$OPTARG";;
         t) TIMEOUT="$OPTARG";;
         o) OUTDIR="$OPTARG";;
         n) DRY=true;;
@@ -493,8 +495,13 @@ log_info "진단: [1]Network → [2]Host → [3]Port"
 if [[ -n "$NODES" ]]; then
     run_multi "$INPUT" "$NODES" "$TIMEOUT" "$OUTDIR" "$DRY" "$TS"
 else
-    NIP=$(get_node_ip)
-    log_info "현재 노드: $NIP"
+    if [[ -n "$FORCE_IP" ]]; then
+        NIP="$FORCE_IP"
+        log_info "지정 노드: $NIP"
+    else
+        NIP=$(get_node_ip)
+        log_info "현재 노드: $NIP"
+    fi
     
     MATCH=false
     while IFS='|' read -r _ src _ _ _ _; do
