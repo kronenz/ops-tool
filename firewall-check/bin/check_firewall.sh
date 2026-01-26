@@ -406,21 +406,26 @@ run_on_remote_node() {
     local remote_csv="/tmp/firewall_check_$$.csv"
     local remote_outdir="/tmp/firewall_reports_$$"
     local status_file="${outdir}/.status_${node}_${ts}.tmp"
-    
+
     echo "RUNNING|0|0" > "$status_file"
-    
+
     ssh -o StrictHostKeyChecking=no "$node" \
         "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -I ${node} -t ${timeout} -o ${remote_outdir} -q" >/dev/null 2>&1
-    
-    scp -q -o StrictHostKeyChecking=no "${node}:${remote_outdir}/*" "${outdir}/" 2>/dev/null || true
-    
+
+    # 원격 report 파일을 로컬 타임스탬프로 이름 변경하여 복사
+    local remote_report=$(ssh -o StrictHostKeyChecking=no "$node" \
+        "ls ${remote_outdir}/report_${node}_*.csv 2>/dev/null | head -1")
+    if [[ -n "$remote_report" ]]; then
+        scp -q -o StrictHostKeyChecking=no "${node}:${remote_report}" "${outdir}/report_${node}_${ts}.csv" 2>/dev/null || true
+    fi
+
     local remote_result=$(ssh -o StrictHostKeyChecking=no "$node" \
         "cat ${remote_outdir}/.result_*_*.tmp 2>/dev/null || echo '$node|0|0|0|0'")
     echo "$remote_result" > "${outdir}/.result_${node}_${ts}.tmp"
-    
+
     IFS='|' read -r _ _ rp rf rr <<< "$remote_result"
     echo "DONE|${rp:-0}|${rf:-0}|${rr:-0}" > "$status_file"
-    
+
     ssh -o StrictHostKeyChecking=no "$node" "rm -rf ${REMOTE_SCRIPT_PATH} ${remote_csv} ${remote_outdir}" 2>/dev/null || true
 }
 
