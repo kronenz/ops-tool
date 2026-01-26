@@ -124,9 +124,9 @@ print_node_detail_table() {
 
     echo ""
     echo -e "  ${CYAN}●${NC} ${BOLD}${node}${NC} ${DIM}(${test_count} tests)${NC}"
-    echo -e "  ${CYAN}┌────────────────┬──────────────────┬───────────────────────────┬──────────┬────────┐${NC}"
-    echo -e "  ${CYAN}│${NC} ${BOLD}SERVICE${NC}        ${CYAN}│${NC} ${BOLD}SOURCE${NC}           ${CYAN}│${NC} ${BOLD}TARGET${NC}                    ${CYAN}│${NC} ${BOLD}PROTOCOL${NC} ${CYAN}│${NC} ${BOLD}RESULT${NC} ${CYAN}│${NC}"
-    echo -e "  ${CYAN}├────────────────┼──────────────────┼───────────────────────────┼──────────┼────────┤${NC}"
+    echo -e "  ${CYAN}┌────────────────┬──────────────────┬───────────────────────────┬──────────┬────────┬─────────────┐${NC}"
+    echo -e "  ${CYAN}│${NC} ${BOLD}SERVICE${NC}        ${CYAN}│${NC} ${BOLD}SOURCE${NC}           ${CYAN}│${NC} ${BOLD}TARGET${NC}                    ${CYAN}│${NC} ${BOLD}PROTOCOL${NC} ${CYAN}│${NC} ${BOLD}RESULT${NC} ${CYAN}│${NC} ${BOLD}N / H / P${NC}   ${CYAN}│${NC}"
+    echo -e "  ${CYAN}├────────────────┼──────────────────┼───────────────────────────┼──────────┼────────┼─────────────┤${NC}"
 
     while IFS='|' read -r row_ts svc src nip tgt prt proto result failat net host port; do
         [[ "$row_ts" == "TIMESTAMP" ]] && continue
@@ -141,16 +141,22 @@ print_node_detail_table() {
             result_display="${RED}✗ ${failat}${NC}"
         fi
 
+        # 3단계 진단 아이콘
+        local net_icon host_icon port_icon
+        [[ "$net" == "PASS" ]] && net_icon="${GREEN}✓${NC}" || { [[ "$net" == "FAIL" ]] && net_icon="${RED}✗${NC}" || net_icon="${GRAY}○${NC}"; }
+        [[ "$host" == "PASS" ]] && host_icon="${GREEN}✓${NC}" || { [[ "$host" == "FAIL" ]] && host_icon="${RED}✗${NC}" || host_icon="${GRAY}○${NC}"; }
+        [[ "$port" == "PASS" ]] && port_icon="${GREEN}✓${NC}" || { [[ "$port" == "FAIL" ]] && port_icon="${RED}✗${NC}" || port_icon="${GRAY}○${NC}"; }
+
         # 긴 문자열 자르기
         local svc_disp="${svc:0:14}"
         local src_disp="${src:0:16}"
         local tgt_disp="${target_str:0:25}"
 
-        printf "  ${CYAN}│${NC} %-14s ${CYAN}│${NC} %-16s ${CYAN}│${NC} %-25s ${CYAN}│${NC} %-8s ${CYAN}│${NC} %b ${CYAN}│${NC}\n" \
-            "$svc_disp" "$src_disp" "$tgt_disp" "$proto" "$result_display"
+        printf "  ${CYAN}│${NC} %-14s ${CYAN}│${NC} %-16s ${CYAN}│${NC} %-25s ${CYAN}│${NC} %-8s ${CYAN}│${NC} %b ${CYAN}│${NC} %b / %b / %b ${CYAN}│${NC}\n" \
+            "$svc_disp" "$src_disp" "$tgt_disp" "$proto" "$result_display" "$net_icon" "$host_icon" "$port_icon"
     done < "$report_file"
 
-    echo -e "  ${CYAN}└────────────────┴──────────────────┴───────────────────────────┴──────────┴────────┘${NC}"
+    echo -e "  ${CYAN}└────────────────┴──────────────────┴───────────────────────────┴──────────┴────────┴─────────────┘${NC}"
 }
 
 log_info()  { echo -e "  ${BLUE}ℹ${NC}  $1"; }
