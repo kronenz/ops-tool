@@ -102,15 +102,61 @@ print_summary_box() {
 print_failure_table() {
     local -n failures_ref=$1
     local count=${#failures_ref[@]}
-    
+
     [[ $count -eq 0 ]] && return
-    
+
     print_section "실패 목록 (${count}건)"
     echo ""
     for f in "${failures_ref[@]}"; do
         IFS='|' read -r svc src nip tgt proto layer <<< "$f"
         echo -e "  ${RED}✗${NC} ${WHITE}${svc}${NC} : ${src} : ${nip} ${DIM}->${NC} ${tgt} ${DIM}(${proto})${NC} : ${RED}${layer}${NC}"
     done
+}
+
+print_node_detail_table() {
+    local report_file="$1"
+    local node="$2"
+
+    [[ ! -f "$report_file" ]] && return
+
+    local test_count=$(tail -n +2 "$report_file" | wc -l)
+    [[ $test_count -eq 0 ]] && return
+
+    echo ""
+    echo -e "  ${CYAN}●${NC} ${BOLD}${node}${NC} ${DIM}(${test_count} tests)${NC}"
+    echo -e "  ${CYAN}┌────────────────┬──────────────────┬───────────────────────────┬──────────┬────────┬─────────────┐${NC}"
+    echo -e "  ${CYAN}│${NC} ${BOLD}SERVICE${NC}        ${CYAN}│${NC} ${BOLD}SOURCE${NC}           ${CYAN}│${NC} ${BOLD}TARGET${NC}                    ${CYAN}│${NC} ${BOLD}PROTOCOL${NC} ${CYAN}│${NC} ${BOLD}RESULT${NC} ${CYAN}│${NC} ${BOLD}N / H / P${NC}   ${CYAN}│${NC}"
+    echo -e "  ${CYAN}├────────────────┼──────────────────┼───────────────────────────┼──────────┼────────┼─────────────┤${NC}"
+
+    while IFS='|' read -r row_ts svc src nip tgt prt proto result failat net host port; do
+        [[ "$row_ts" == "TIMESTAMP" ]] && continue
+
+        local target_str="$tgt"
+        [[ -n "$prt" ]] && target_str="${tgt}:${prt}"
+
+        local result_display
+        if [[ "$result" == "PASS" ]]; then
+            result_display="${GREEN}✓ PASS${NC}"
+        else
+            result_display="${RED}✗ ${failat}${NC}"
+        fi
+
+        # 3단계 진단 아이콘
+        local net_icon host_icon port_icon
+        [[ "$net" == "PASS" ]] && net_icon="${GREEN}✓${NC}" || { [[ "$net" == "FAIL" ]] && net_icon="${RED}✗${NC}" || net_icon="${GRAY}○${NC}"; }
+        [[ "$host" == "PASS" ]] && host_icon="${GREEN}✓${NC}" || { [[ "$host" == "FAIL" ]] && host_icon="${RED}✗${NC}" || host_icon="${GRAY}○${NC}"; }
+        [[ "$port" == "PASS" ]] && port_icon="${GREEN}✓${NC}" || { [[ "$port" == "FAIL" ]] && port_icon="${RED}✗${NC}" || port_icon="${GRAY}○${NC}"; }
+
+        # 긴 문자열 자르기
+        local svc_disp="${svc:0:14}"
+        local src_disp="${src:0:16}"
+        local tgt_disp="${target_str:0:25}"
+
+        printf "  ${CYAN}│${NC} %-14s ${CYAN}│${NC} %-16s ${CYAN}│${NC} %-25s ${CYAN}│${NC} %-8s ${CYAN}│${NC} %b ${CYAN}│${NC} %b / %b / %b ${CYAN}│${NC}\n" \
+            "$svc_disp" "$src_disp" "$tgt_disp" "$proto" "$result_display" "$net_icon" "$host_icon" "$port_icon"
+    done < "$report_file"
+
+    echo -e "  ${CYAN}└────────────────┴──────────────────┴───────────────────────────┴──────────┴────────┴─────────────┘${NC}"
 }
 
 log_info()  { echo -e "  ${BLUE}ℹ${NC}  $1"; }
@@ -382,20 +428,22 @@ monitor_progress() {
     local outdir="$1" ts="$2" total_nodes="$3"
     shift 3
     local nodes=("$@")
-    
+
     echo ""
     while true; do
         local all_done=true
         local line=""
-        
+
         for node in "${nodes[@]}"; do
             local sf="${outdir}/.status_${node}_${ts}.tmp"
             local status="WAIT" current=0 expected=0 pass=0 fail=0 rate=0
-            
+
             if [[ -f "$sf" ]]; then
                 IFS='|' read -r status p1 p2 p3 < "$sf"
                 if [[ "$status" == "RUNNING" ]]; then
                     current=$p1; expected=$p2
+                    all_done=false
+                elif [[ "$status" == "WAIT" ]]; then
                     all_done=false
                 elif [[ "$status" == "DONE" ]]; then
                     pass=$p1; fail=$p2; rate=$p3
@@ -541,7 +589,14 @@ run_multi_parallel() {
     printf "${CYAN}│${NC}   ${BOLD}%-14s${NC} ${CYAN}│${NC} ${BOLD}%8s${NC} ${CYAN}│${NC} ${GREEN}${BOLD}%8s${NC} ${CYAN}│${NC} ${RED}${BOLD}%8s${NC} ${CYAN}│${NC} ${BOLD}%7s%%${NC} ${CYAN}│${NC}\n" \
         "TOTAL" "$tt" "$tp" "$tf" "$or"
     echo -e "${CYAN}└──────────────────┴──────────┴──────────┴──────────┴──────────┘${NC}"
-    
+
+    # 노드별 상세 결과 표시
+    print_section "노드별 상세 결과"
+    for n in "${accessible_nodes[@]}"; do
+        local rpt="${outdir}/report_${n}_${ts}.csv"
+        print_node_detail_table "$rpt" "$n"
+    done
+
     if [[ $tf -gt 0 ]]; then
         echo ""
         print_section "실패 목록 (${tf}건)"
