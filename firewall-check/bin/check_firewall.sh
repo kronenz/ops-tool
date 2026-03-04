@@ -14,10 +14,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 
-DEFAULT_TIMEOUT=2
-DEFAULT_PING_COUNT=3
+DEFAULT_TIMEOUT=1
+DEFAULT_PING_COUNT=1
 DEFAULT_OUTPUT_DIR="${PROJECT_DIR}/reports"
-REMOTE_SCRIPT_PATH="/tmp/check_firewall_$$.sh"
 
 if [[ -t 1 ]]; then
     RED=$'\033[0;31m'
@@ -383,188 +382,33 @@ run_node_test() {
 }
 
 #===============================================================================
-# 병렬 실행 - 다중 노드
+# 다중 노드 직렬 실행
 #===============================================================================
 
-check_ssh_access() {
-    local node="$1"
-    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$node" "echo OK" &>/dev/null
-}
-
-deploy_to_node() {
-    local node="$1" input="$2" outdir="$3"
-    local remote_csv="/tmp/firewall_check_$$.csv"
-    local remote_outdir="/tmp/firewall_reports_$$"
-    
-    scp -q -o StrictHostKeyChecking=no "$SCRIPT_PATH" "${node}:${REMOTE_SCRIPT_PATH}" && \
-    scp -q -o StrictHostKeyChecking=no "$input" "${node}:${remote_csv}" && \
-    ssh -o StrictHostKeyChecking=no "$node" "chmod +x ${REMOTE_SCRIPT_PATH}; mkdir -p ${remote_outdir}"
-}
-
-run_on_remote_node() {
-    local node="$1" timeout="$2" outdir="$3" ts="$4"
-    local remote_csv="/tmp/firewall_check_$$.csv"
-    local remote_outdir="/tmp/firewall_reports_$$"
-    local status_file="${outdir}/.status_${node}_${ts}.tmp"
-
-    echo "RUNNING|0|0" > "$status_file"
-
-    ssh -o StrictHostKeyChecking=no "$node" \
-        "${REMOTE_SCRIPT_PATH} -i ${remote_csv} -I ${node} -t ${timeout} -o ${remote_outdir} -q" >/dev/null 2>&1
-
-    # 원격 report 파일을 로컬 타임스탬프로 이름 변경하여 복사
-    local remote_report=$(ssh -o StrictHostKeyChecking=no "$node" \
-        "ls ${remote_outdir}/report_${node}_*.csv 2>/dev/null | head -1")
-    if [[ -n "$remote_report" ]]; then
-        scp -q -o StrictHostKeyChecking=no "${node}:${remote_report}" "${outdir}/report_${node}_${ts}.csv" 2>/dev/null || true
-    fi
-
-    local remote_result=$(ssh -o StrictHostKeyChecking=no "$node" \
-        "cat ${remote_outdir}/.result_*_*.tmp 2>/dev/null || echo '$node|0|0|0|0'")
-    echo "$remote_result" > "${outdir}/.result_${node}_${ts}.tmp"
-
-    IFS='|' read -r _ _ rp rf rr <<< "$remote_result"
-    echo "DONE|${rp:-0}|${rf:-0}|${rr:-0}" > "$status_file"
-
-    ssh -o StrictHostKeyChecking=no "$node" "rm -rf ${REMOTE_SCRIPT_PATH} ${remote_csv} ${remote_outdir}" 2>/dev/null || true
-}
-
-monitor_progress() {
-    local outdir="$1" ts="$2" total_nodes="$3"
-    shift 3
-    local nodes=("$@")
-
-    echo ""
-    while true; do
-        local all_done=true
-        local line=""
-
-        for node in "${nodes[@]}"; do
-            local sf="${outdir}/.status_${node}_${ts}.tmp"
-            local status="WAIT" current=0 expected=0 pass=0 fail=0 rate=0
-
-            if [[ -f "$sf" ]]; then
-                IFS='|' read -r status p1 p2 p3 < "$sf"
-                if [[ "$status" == "RUNNING" ]]; then
-                    current=$p1; expected=$p2
-                    all_done=false
-                elif [[ "$status" == "WAIT" ]]; then
-                    all_done=false
-                elif [[ "$status" == "DONE" ]]; then
-                    pass=$p1; fail=$p2; rate=$p3
-                fi
-            else
-                all_done=false
-            fi
-            
-            local short_node="${node: -12}"
-            if [[ "$status" == "DONE" ]]; then
-                line+="  ${GREEN}✓${NC} ${short_node} ${DIM}(${pass}/${fail})${NC}"
-            elif [[ "$status" == "RUNNING" ]]; then
-                local pct=0
-                [[ $expected -gt 0 ]] && pct=$((current * 100 / expected))
-                line+="  ${YELLOW}►${NC} ${short_node} ${DIM}(${pct}%)${NC}"
-            else
-                line+="  ${GRAY}◌${NC} ${short_node}"
-            fi
-        done
-        
-        printf "\r%-100s" "$line"
-        
-        $all_done && break
-        sleep 1
-    done
-    echo ""
-}
-
-run_multi_parallel() {
+run_multi_serial() {
     local input="$1" nfile="$2" timeout="$3" outdir="$4" dry="$5" ts="$6"
     local nodes=()
-    local accessible_nodes=()
-    local failed_nodes=()
     local my_ip=$(get_node_ip)
-    local pids=()
-    
+
     while IFS= read -r n; do
         n=$(echo "$n" | xargs | grep -v '^#')
         [[ -n "$n" ]] && nodes+=("$n")
     done < "$nfile"
-    
-    print_section "1단계: 노드 목록"
-    log_info "컨트롤플레인: $my_ip"
-    log_info "대상 노드: ${#nodes[@]}개"
+
+    print_section "노드 목록"
+    log_info "실행 호스트: $my_ip"
+    log_info "대상 노드: ${#nodes[@]}개 (로컬 직렬 처리)"
     for n in "${nodes[@]}"; do
-        [[ "$n" == "$my_ip" ]] && echo -e "    ${GREEN}●${NC} $n ${DIM}(local)${NC}" || echo -e "    ${BLUE}●${NC} $n ${DIM}(remote)${NC}"
+        echo -e "    ${BLUE}●${NC} $n"
     done
-    
-    print_section "2단계: SSH 접근 확인"
+
+    print_section "연결 테스트 실행"
+
     for n in "${nodes[@]}"; do
-        printf "    %-20s " "$n"
-        if [[ "$n" == "$my_ip" ]]; then
-            echo -e "${GREEN}✓${NC} local"
-            accessible_nodes+=("$n")
-        elif [[ "$dry" == true ]]; then
-            echo -e "${GREEN}✓${NC} dry-run"
-            accessible_nodes+=("$n")
-        elif check_ssh_access "$n"; then
-            echo -e "${GREEN}✓${NC} OK"
-            accessible_nodes+=("$n")
-        else
-            echo -e "${RED}✗${NC} FAIL"
-            failed_nodes+=("$n")
-        fi
+        run_node_test "$input" "$n" "$timeout" "$outdir" "$dry" "$ts" "false"
     done
-    
-    if [[ ${#failed_nodes[@]} -gt 0 ]]; then
-        echo ""
-        log_warn "SSH 접근 불가 노드: ${#failed_nodes[@]}개"
-        for fn in "${failed_nodes[@]}"; do
-            echo -e "    ${RED}✗${NC} $fn"
-            echo "$fn|0|0|0|0" > "${outdir}/.result_${fn}_${ts}.tmp"
-        done
-    fi
-    
-    [[ ${#accessible_nodes[@]} -eq 0 ]] && {
-        log_error "접근 가능한 노드가 없습니다"
-        exit 1
-    }
-    
-    print_section "3단계: 파일 배포"
-    for n in "${accessible_nodes[@]}"; do
-        printf "    %-20s " "$n"
-        if [[ "$n" == "$my_ip" ]] || [[ "$dry" == true ]]; then
-            echo -e "${GREEN}✓${NC} skip (local/dry)"
-        elif deploy_to_node "$n" "$input" "$outdir"; then
-            echo -e "${GREEN}✓${NC} OK"
-        else
-            echo -e "${RED}✗${NC} FAIL"
-        fi
-    done
-    
-    print_section "4단계: 병렬 테스트 실행"
-    log_info "모든 노드에서 동시 실행 중..."
-    
-    for n in "${accessible_nodes[@]}"; do
-        echo "WAIT|0|0" > "${outdir}/.status_${n}_${ts}.tmp"
-    done
-    
-    for n in "${accessible_nodes[@]}"; do
-        if [[ "$n" == "$my_ip" ]] || [[ "$dry" == true ]]; then
-            run_node_test "$input" "$n" "$timeout" "$outdir" "$dry" "$ts" "true" &
-            pids+=($!)
-        else
-            run_on_remote_node "$n" "$timeout" "$outdir" "$ts" &
-            pids+=($!)
-        fi
-    done
-    
-    monitor_progress "$outdir" "$ts" "${#accessible_nodes[@]}" "${accessible_nodes[@]}"
-    
-    for pid in "${pids[@]}"; do
-        wait "$pid" 2>/dev/null || true
-    done
-    
-    print_section "5단계: 결과 집계"
+
+    print_section "결과 집계"
     
     local tt=0 tp=0 tf=0
     
@@ -597,7 +441,7 @@ run_multi_parallel() {
 
     # 노드별 상세 결과 표시
     print_section "노드별 상세 결과"
-    for n in "${accessible_nodes[@]}"; do
+    for n in "${nodes[@]}"; do
         local rpt="${outdir}/report_${n}_${ts}.csv"
         print_node_detail_table "$rpt" "$n"
     done
@@ -606,7 +450,7 @@ run_multi_parallel() {
         echo ""
         print_section "실패 목록 (${tf}건)"
         echo ""
-        for n in "${accessible_nodes[@]}"; do
+        for n in "${nodes[@]}"; do
             local rpt="${outdir}/report_${n}_${ts}.csv"
             [[ -f "$rpt" ]] || continue
             while IFS='|' read -r _ svc src nip tgt prt proto result failat _; do
@@ -617,19 +461,19 @@ run_multi_parallel() {
             done < "$rpt"
         done
     fi
-    
+
     for n in "${nodes[@]}"; do
         rm -f "${outdir}/.status_${n}_${ts}.tmp" "${outdir}/.result_${n}_${ts}.tmp"
     done
-    
+
     local agg="${outdir}/summary_${ts}.txt"
     cat << EOF > "$agg"
 ================================================================================
  방화벽 3단계 진단 - 전체 집계
 ================================================================================
  실행시각: $(date '+%Y-%m-%d %H:%M:%S')
- 컨트롤플레인: $my_ip
- 대상노드: ${#nodes[@]}개 (성공: ${#accessible_nodes[@]}, 실패: ${#failed_nodes[@]})
+ 실행호스트: $my_ip
+ 대상노드: ${#nodes[@]}개 (로컬 직렬 처리)
 --------------------------------------------------------------------------------
  총 테스트: $tt | PASS: $tp | FAIL: $tf | 성공률: ${or}%
 ================================================================================
@@ -675,7 +519,7 @@ TS=$(date '+%Y%m%d_%H%M%S')
 }
 
 if [[ -n "$NODES" ]]; then
-    run_multi_parallel "$INPUT" "$NODES" "$TIMEOUT" "$OUTDIR" "$DRY" "$TS"
+    run_multi_serial "$INPUT" "$NODES" "$TIMEOUT" "$OUTDIR" "$DRY" "$TS"
 else
     if [[ -n "$FORCE_IP" ]]; then
         NIP="$FORCE_IP"
