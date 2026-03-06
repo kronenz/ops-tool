@@ -295,7 +295,7 @@ test_host() {
 
 test_port() {
     local target="$1" port="$2" proto="$3" timeout="$4" dry="$5"
-    [[ "$DEBUG" == true ]] && printf "DEBUG[port]: nc -z -w %s target=%q port=%q proto=%s\n" "$timeout" "$target" "$port" "$proto" >&2
+    [[ "$DEBUG" == true ]] && printf "DEBUG[port]: nc -z -w %s %q %q (%s)\n" "$timeout" "$target" "$port" "$proto" >&2
     [[ "$dry" == true ]] && {
         [[ "$target" =~ ^(127\.|8\.8\.) ]] && echo "PASS|PORT_OPEN" || echo "FAIL|PORT_CLOSED"
         return
