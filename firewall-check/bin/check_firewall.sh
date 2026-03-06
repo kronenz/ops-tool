@@ -174,6 +174,7 @@ Usage: $(basename "$0") -i <csv> [-N <nodes>] [-I <ip>] [-t <timeout>] [-o <dir>
   -t  타임아웃 (기본: 2초)
   -o  출력 디렉토리
   -n  dry-run 모드
+  -d  디버그 모드 (실제 호출 명령어 출력)
 EOF
     exit 1
 }
@@ -273,24 +274,29 @@ count_tests() {
 #===============================================================================
 
 test_network() {
-    [[ "$2" == true ]] && { 
-        [[ "$1" =~ ^(127\.|8\.8\.|10\.|192\.168\.) ]] && echo "PASS|ROUTE_OK" || echo "FAIL|NO_ROUTE"
+    local target="$1" dry="$2"
+    [[ "$DEBUG" == true ]] && echo "DEBUG[network]: ip route get '$target'" >&2
+    [[ "$dry" == true ]] && {
+        [[ "$target" =~ ^(127\.|8\.8\.|10\.|192\.168\.) ]] && echo "PASS|ROUTE_OK" || echo "FAIL|NO_ROUTE"
         return
     }
-    ip route get "$1" &>/dev/null && echo "PASS|ROUTE_OK" || echo "FAIL|NO_ROUTE"
+    ip route get "$target" &>/dev/null && echo "PASS|ROUTE_OK" || echo "FAIL|NO_ROUTE"
 }
 
 test_host() {
-    [[ "$3" == true ]] && { 
-        [[ "$1" =~ ^(127\.|8\.8\.) ]] && echo "PASS|ICMP_OK" || echo "FAIL|ICMP_TIMEOUT"
+    local target="$1" timeout="$2" dry="$3"
+    [[ "$DEBUG" == true ]] && echo "DEBUG[host]: ping -c $DEFAULT_PING_COUNT -W $timeout '$target'" >&2
+    [[ "$dry" == true ]] && {
+        [[ "$target" =~ ^(127\.|8\.8\.) ]] && echo "PASS|ICMP_OK" || echo "FAIL|ICMP_TIMEOUT"
         return
     }
-    ping -c "$DEFAULT_PING_COUNT" -W "$2" "$1" &>/dev/null && echo "PASS|ICMP_OK" || echo "FAIL|ICMP_TIMEOUT"
+    ping -c "$DEFAULT_PING_COUNT" -W "$timeout" "$target" &>/dev/null && echo "PASS|ICMP_OK" || echo "FAIL|ICMP_TIMEOUT"
 }
 
 test_port() {
     local target="$1" port="$2" proto="$3" timeout="$4" dry="$5"
-    [[ "$dry" == true ]] && { 
+    [[ "$DEBUG" == true ]] && printf "DEBUG[port]: nc -z -w %s target=%q port=%q proto=%s\n" "$timeout" "$target" "$port" "$proto" >&2
+    [[ "$dry" == true ]] && {
         [[ "$target" =~ ^(127\.|8\.8\.) ]] && echo "PASS|PORT_OPEN" || echo "FAIL|PORT_CLOSED"
         return
     }
@@ -523,9 +529,9 @@ EOF
 # 메인
 #===============================================================================
 
-INPUT="" NODES="" TIMEOUT="$DEFAULT_TIMEOUT" OUTDIR="$DEFAULT_OUTPUT_DIR" DRY=false FORCE_IP="" QUIET=false
+INPUT="" NODES="" TIMEOUT="$DEFAULT_TIMEOUT" OUTDIR="$DEFAULT_OUTPUT_DIR" DRY=false FORCE_IP="" QUIET=false DEBUG=false
 
-while getopts "i:N:I:t:o:nqh" opt; do
+while getopts "i:N:I:t:o:nqdh" opt; do
     case $opt in
         i) INPUT="$OPTARG";;
         N) NODES="$OPTARG";;
@@ -534,6 +540,7 @@ while getopts "i:N:I:t:o:nqh" opt; do
         o) OUTDIR="$OPTARG";;
         n) DRY=true;;
         q) QUIET=true;;
+        d) DEBUG=true;;
         h) usage;;
         *) usage;;
     esac
@@ -552,6 +559,7 @@ TS=$(date '+%Y%m%d_%H%M%S')
     log_info "입력: $INPUT"
     log_info "진단: [1]Network → [2]Host → [3]Port"
     [[ "$DRY" == true ]] && log_warn "DRY-RUN 모드"
+    [[ "$DEBUG" == true ]] && log_warn "DEBUG 모드 - 실제 호출 명령어 출력"
 }
 
 if [[ -n "$NODES" ]]; then
