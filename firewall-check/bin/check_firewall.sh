@@ -202,8 +202,44 @@ get_node_ip() {
     echo "unknown"
 }
 
-parse_targets() { 
-    echo "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
+# IP 주소 정규화 - 보이지 않는 문자, 공백 제거 및 유효성 검사
+normalize_ip() {
+    local ip="$1"
+    # 모든 공백, 탭, \r, BOM, 보이지 않는 문자 제거
+    ip=$(echo "$ip" | tr -d '[:space:]' | tr -d '\r' | sed 's/\xef\xbb\xbf//g' | tr -cd '0-9.')
+    # IP 형식 검증 (간단한 검사)
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ip"
+    else
+        echo ""
+    fi
+}
+
+# 포트 정규화
+normalize_port() {
+    local port="$1"
+    port=$(echo "$port" | tr -d '[:space:]' | tr -d '\r' | tr -cd '0-9')
+    if [[ "$port" =~ ^[0-9]+$ ]] && [[ "$port" -ge 1 ]] && [[ "$port" -le 65535 ]]; then
+        echo "$port"
+    else
+        echo ""
+    fi
+}
+
+parse_targets() {
+    local input="$1"
+    echo "$input" | tr ',' '\n' | while read -r item; do
+        local normalized=$(normalize_ip "$item")
+        [[ -n "$normalized" ]] && echo "$normalized"
+    done
+}
+
+parse_ports() {
+    local input="$1"
+    echo "$input" | tr ',' '\n' | while read -r item; do
+        local normalized=$(normalize_port "$item")
+        [[ -n "$normalized" ]] && echo "$normalized"
+    done
 }
 
 validate_csv_header() {
@@ -362,7 +398,7 @@ run_node_test() {
                         ((fail++)); svc_fail[$service]=$((${svc_fail[$service]:-0}+1))
                         failures+=("$service|$source|$node|$tgt:$prt|$protocol|$fat")
                     fi
-                done < <(parse_targets "$port")
+                done < <(parse_ports "$port")
             fi
         done < <(parse_targets "$target")
     done < <(tail -n +2 "$input")
